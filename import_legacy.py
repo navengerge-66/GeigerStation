@@ -62,31 +62,66 @@ BATCH_SIZE   = 500   # rows per HTTP request
 
 # ── CSV loading ───────────────────────────────────────────────────────────────
 
+# Tbilisi is UTC+4. Legacy RadStation.py logged naive local timestamps with no
+# timezone info, so we must tell pandas what zone those timestamps are in.
+LOCAL_TZ = 'Asia/Tbilisi'
+
 def load_csv(path: Path) -> pd.DataFrame:
     """
-    Load a legacy CSV file. Accepts flexible timestamp formats.
-    Expected columns (case-insensitive): timestamp, mrh_value
+    Load a legacy CSV produced by RadStation.py.
+
+    RadStation.py writes headerless rows: <ISO-timestamp-local>, <float-value>
+    e.g.  2026-03-16T23:52:29.420000,14.7
+
+    Also handles CSVs that DO have a header row with named columns.
     """
-    df = pd.read_csv(path)
-    df.columns = [c.strip().lower() for c in df.columns]
+    # ── Try headerless format first (RadStation.py native) ───────────────────
+    # Peek at the first cell: if it parses as a datetime it's a data row, not
+    # a header, so we read with header=None.
+    try:
+        peek = pd.read_csv(path, nrows=1, header=None)
+        first_cell = str(peek.iloc[0, 0]).strip()
+        pd.to_datetime(first_cell)          # raises if not a timestamp
+        headerless = True
+    except Exception:
+        headerless = False
 
-    # Accept 'time', 'datetime', 'date' as timestamp aliases
-    ts_candidates = ['timestamp', 'time', 'datetime', 'date']
-    ts_col = next((c for c in ts_candidates if c in df.columns), None)
-    if ts_col is None:
-        raise ValueError(f"{path.name}: cannot find a timestamp column. Got: {list(df.columns)}")
+    if headerless:
+        df = pd.read_csv(path, header=None)
+        if df.shape[1] < 2:
+            raise ValueError(f"{path.name}: expected at least 2 columns, got {df.shape[1]}")
+        df = df.iloc[:, :2].copy()
+        df.columns = ['timestamp', 'mrh_value']
+    else:
+        # ── Named-header fallback ─────────────────────────────────────────────
+        df = pd.read_csv(path)
+        df.columns = [c.strip().lower() for c in df.columns]
 
-    val_candidates = ['mrh_value', 'mrh', 'value', 'usvh', 'cpm']
-    val_col = next((c for c in val_candidates if c in df.columns), None)
-    if val_col is None:
-        raise ValueError(f"{path.name}: cannot find a value column. Got: {list(df.columns)}")
+        ts_candidates  = ['timestamp', 'time', 'datetime', 'date']
+        val_candidates = ['mrh_value', 'mrh', 'value', 'usvh', 'cpm']
 
-    df = df.rename(columns={ts_col: 'timestamp', val_col: 'mrh_value'})
-    df = df[['timestamp', 'mrh_value']].copy()
+        ts_col  = next((c for c in ts_candidates  if c in df.columns), None)
+        val_col = next((c for c in val_candidates if c in df.columns), None)
 
-    df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+        if ts_col is None:
+            raise ValueError(f"{path.name}: cannot find a timestamp column. Got: {list(df.columns)}")
+        if val_col is None:
+            raise ValueError(f"{path.name}: cannot find a value column. Got: {list(df.columns)}")
+
+        df = df.rename(columns={ts_col: 'timestamp', val_col: 'mrh_value'})
+        df = df[['timestamp', 'mrh_value']].copy()
+
+    # ── Parse timestamps ──────────────────────────────────────────────────────
     df['mrh_value'] = pd.to_numeric(df['mrh_value'], errors='coerce')
-    df = df.dropna()
+    df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+
+    # If timestamps are timezone-naive (RadStation.py local time), attach the
+    # local timezone so tz_convert to UTC works correctly.
+    if df['timestamp'].dt.tz is None:
+        df['timestamp'] = df['timestamp'].dt.tz_localize(LOCAL_TZ, ambiguous='infer', nonexistent='shift_forward')
+
+    df['timestamp'] = df['timestamp'].dt.tz_convert('UTC')
+    df = df.dropna(subset=['timestamp', 'mrh_value'])
     log.info(f"  Loaded {len(df):,} raw rows from {path.name}")
     return df
 
