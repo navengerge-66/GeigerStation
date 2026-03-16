@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+.env
+.venv/
+venv/
+env/
+
+# Runtime / log data — never commit sensor logs to the repo
+*.csv
+*.log
+*.png
+archive/
+
+# Arduino build artefacts
+*.elf
+*.hex
+*.bin
+*.map
+build/
+
+# OS artefacts
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+*.code-workspace
