@@ -6,8 +6,23 @@ downsamples to 1-minute averages, and bulk-uploads to the geiger_logs
 Supabase table. Records for minutes that already exist are silently skipped.
 
 Usage:
-    python import_legacy.py path/to/file.csv [file2.csv ...]
-    python import_legacy.py path/to/csv_folder/
+    # Import a single file
+    python import_legacy.py data.csv
+
+    # Import every CSV in a folder (non-recursive)
+    python import_legacy.py /path/to/folder/
+
+    # Import every CSV in a folder AND all sub-folders
+    python import_legacy.py /path/to/folder/ --recursive
+
+    # Run from inside the data folder — imports everything here
+    python import_legacy.py .
+
+    # Named --folder shorthand
+    python import_legacy.py --folder /path/to/folder/
+
+    # Preview without uploading
+    python import_legacy.py . --dry-run
 
 Requirements:
     pip install pandas requests python-dotenv
@@ -69,7 +84,7 @@ def load_csv(path: Path) -> pd.DataFrame:
     df = df.rename(columns={ts_col: 'timestamp', val_col: 'mrh_value'})
     df = df[['timestamp', 'mrh_value']].copy()
 
-    df['timestamp'] = pd.to_datetime(df['timestamp'], infer_datetime_format=True, utc=True)
+    df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
     df['mrh_value'] = pd.to_numeric(df['mrh_value'], errors='coerce')
     df = df.dropna()
     log.info(f"  Loaded {len(df):,} raw rows from {path.name}")
@@ -143,45 +158,93 @@ def upload_dataframe(df: pd.DataFrame) -> tuple[int, int]:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-def collect_csv_files(paths: list[str]) -> list[Path]:
+def collect_csv_files(paths: list[str], recursive: bool = False) -> list[Path]:
     files = []
+    glob_pattern = '**/*.csv' if recursive else '*.csv'
     for p in paths:
         path = Path(p)
         if path.is_dir():
-            files.extend(sorted(path.glob('*.csv')))
+            found = sorted(path.glob(glob_pattern))
+            if not found:
+                log.warning(f"No CSV files found in {path}" + (" (try --recursive?)" if not recursive else ""))
+            files.extend(found)
         elif path.is_file() and path.suffix.lower() == '.csv':
             files.append(path)
         else:
             log.warning(f"Skipping {p} (not a .csv file or directory)")
-    return files
+    # deduplicate while preserving order (e.g. if a file and its parent dir are both given)
+    seen = set()
+    unique = []
+    for f in files:
+        key = f.resolve()
+        if key not in seen:
+            seen.add(key)
+            unique.append(f)
+    return unique
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Import legacy CSV radiation data into Supabase')
-    parser.add_argument('paths', nargs='+', help='CSV file(s) or directory containing CSVs')
-    parser.add_argument('--dry-run', action='store_true', help='Process files but do not upload')
+    parser = argparse.ArgumentParser(
+        description='Batch-import legacy CSV radiation data into Supabase',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  python import_legacy.py .                       # all CSVs in current folder\n"
+            "  python import_legacy.py /data/ --recursive     # all CSVs including sub-folders\n"
+            "  python import_legacy.py --folder /data/        # named --folder shorthand\n"
+            "  python import_legacy.py file1.csv file2.csv    # specific files\n"
+            "  python import_legacy.py . --dry-run            # preview without uploading\n"
+        )
+    )
+    parser.add_argument(
+        'paths', nargs='*',
+        help='CSV file(s) or folder(s). Defaults to current directory if omitted.',
+    )
+    parser.add_argument(
+        '--folder', '-f', dest='folder',
+        help='Folder containing CSV files (alternative to positional path).',
+    )
+    parser.add_argument(
+        '--recursive', '-r', action='store_true',
+        help='Also scan sub-folders for CSV files.',
+    )
+    parser.add_argument(
+        '--dry-run', action='store_true',
+        help='Process and preview files but skip uploading.',
+    )
     args = parser.parse_args()
+
+    # Build the list of paths to scan: positional + --folder + fallback to '.'
+    scan_paths = list(args.paths)
+    if args.folder:
+        scan_paths.append(args.folder)
+    if not scan_paths:
+        scan_paths = ['.']
+        log.info("No path given — scanning current directory for CSVs.")
 
     if not args.dry_run:
         if not SUPABASE_URL or not SUPABASE_KEY:
             log.error("SUPABASE_URL and SUPABASE_KEY must be set (env vars or .env file).")
             sys.exit(1)
 
-    csv_files = collect_csv_files(args.paths)
+    csv_files = collect_csv_files(scan_paths, recursive=args.recursive)
     if not csv_files:
-        log.error("No CSV files found.")
+        log.error("No CSV files found. Use --recursive to also scan sub-folders.")
         sys.exit(1)
 
     log.info(f"Found {len(csv_files)} CSV file(s) to process.")
+    for f in csv_files:
+        log.info(f"  {f}")
 
     grand_total_inserted = 0
     grand_total_skipped  = 0
+    errors               = []
 
-    for csv_path in csv_files:
-        log.info(f"Processing: {csv_path}")
+    for idx, csv_path in enumerate(csv_files, 1):
+        log.info(f"\n[{idx}/{len(csv_files)}] Processing: {csv_path.name}")
         try:
-            raw_df      = load_csv(csv_path)
-            resampled   = downsample(raw_df)
+            raw_df    = load_csv(csv_path)
+            resampled = downsample(raw_df)
 
             if args.dry_run:
                 log.info(f"  [DRY RUN] Would upload {len(resampled):,} rows — skipping.")
@@ -191,13 +254,24 @@ def main():
             ins, skip = upload_dataframe(resampled)
             grand_total_inserted += ins
             grand_total_skipped  += skip
-            log.info(f"  Done: {ins} inserted, {skip} skipped.")
+            log.info(f"  Done: +{ins:,} inserted, {skip:,} duplicates skipped.")
 
         except Exception as e:
-            log.error(f"  Failed to process {csv_path.name}: {e}", exc_info=True)
+            log.error(f"  FAILED: {e}", exc_info=False)
+            errors.append((csv_path.name, str(e)))
 
+    # ── Final summary ─────────────────────────────────────────────────────────
+    log.info("\n" + "=" * 60)
     if not args.dry_run:
-        log.info(f"\nTotal: {grand_total_inserted:,} inserted, {grand_total_skipped:,} duplicates skipped.")
+        log.info(f"TOTAL  inserted : {grand_total_inserted:,}")
+        log.info(f"TOTAL  skipped  : {grand_total_skipped:,}")
+        log.info(f"Files processed : {len(csv_files) - len(errors)} / {len(csv_files)}")
+    if errors:
+        log.warning(f"{len(errors)} file(s) failed:")
+        for name, msg in errors:
+            log.warning(f"  {name}: {msg}")
+        sys.exit(2)
+    log.info("Import complete.")
 
 
 if __name__ == '__main__':
