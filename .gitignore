@@ -35,3 +35,10 @@ desktop.ini
 # Editor
 .vscode/
 *.code-workspace
+
+# Supabase
+supabase/.temp/
+supabase/.branches/
+.env.local
+.env.*.local
+.env.keys
