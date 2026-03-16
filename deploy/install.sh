@@ -90,11 +90,19 @@ ok "Python packages installed into venv."
 
 # ── Step 4: Telegram credentials ──────────────────────────────────────────────
 step "Telegram credentials"
-read -r -p "  Enter your Telegram Bot Token (or press Enter to skip): " TG_TOKEN
-read -r -p "  Enter your Telegram Chat ID   (or press Enter to skip): " TG_CHAT
+# Always pre-initialise so set -u never sees an unbound variable.
+TG_TOKEN=""
+TG_CHAT=""
+
+# When the script is piped through `curl | sudo bash`, stdin is the pipe not
+# the terminal.  Redirect read to /dev/tty so the user can type interactively.
+read -r -p "  Enter your Telegram Bot Token (or press Enter to skip): " TG_TOKEN </dev/tty || true
+read -r -p "  Enter your Telegram Chat ID   (or press Enter to skip): " TG_CHAT  </dev/tty || true
 
 if [[ -z "$TG_TOKEN" ]]; then
-    warn "No token provided — notifications disabled. Edit the .service files later."
+    warn "No token provided — notifications disabled. Edit the unit files later:"
+    warn "  sudo systemctl edit radstation          (add TELEGRAM_TOKEN)"
+    warn "  sudo systemctl edit radstation-updater  (add TELEGRAM_TOKEN + CHAT_ID)"
     TG_TOKEN="YOUR_TOKEN_HERE"
     TG_CHAT="YOUR_CHAT_ID_HERE"
 fi
