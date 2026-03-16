@@ -5,12 +5,13 @@
  *
  * Body (JSON):
  *   {
- *     date:     "2026-03-12",   // YYYY-MM-DD
- *     peakMrh:  85.2            // peak reading in µRh/h
+ *     date:       "2026-03-12",   // YYYY-MM-DD
+ *     peakMrh:    85.2,           // peak reading in µRh/h
+ *     isAnomaly:  true            // true → forensic report | false → sarcastic one-liner
  *   }
  *
  * Returns:
- *   { report: "..." }   — 3-sentence forensic interpretation
+ *   { report: "..." }
  *
  * Required Netlify env var:
  *   GEMINI_API_KEY   — Google AI Studio key (aistudio.google.com/apikey)
@@ -19,7 +20,8 @@
 const GEMINI_URL =
     'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
 
-const SYSTEM_PROMPT =
+// ── Mode A: Anomaly — serious nuclear forensics ───────────────────────────────
+const FORENSIC_PROMPT =
     'You are a specialized nuclear forensics AI operating a high-security terminal. ' +
     'The monitoring station is located in Tbilisi, Georgia (41.69°N, 44.83°E, elevation ~490 m ASL), ' +
     'using an SBM-20 Geiger-Müller tube. Typical background for this location is 12–18 µRh/h. ' +
@@ -33,6 +35,18 @@ const SYSTEM_PROMPT =
     'Sentence 3: explain the physical mechanism linking that event to the measured spike. ' +
     'Write in the clipped, precise tone of a classified terminal readout. Use correct physical units.';
 
+// ── Mode B: Normal — sarcastic Fallout-style one-liner ────────────────────────
+const SARCASTIC_PROMPT =
+    'You are a sarcastic pre-war robot assistant (think Codsworth from Fallout, or GERTY from the film Moon, ' +
+    'or HAL 9000 if he were having a good day). ' +
+    'The radiation data for this day is completely normal and boring. ' +
+    'Respond with exactly ONE short, witty one-liner — either a paraphrase of a famous sci-fi quote ' +
+    'or an original quip in that style — about how mundanely safe and uneventful the radiation levels are. ' +
+    'Classic sources: Fallout series, 2001: A Space Odyssey, Alien, WarGames, Portal, Hitchhiker\'s Guide, ' +
+    'Dr. Strangelove, Chernobyl (HBO), The Martian. ' +
+    'Keep it under 20 words. No explanations, no headers, just the one-liner. ' +
+    'Write in ALL CAPS terminal style.';
+
 // ── CORS headers ──────────────────────────────────────────────────────────────
 const CORS = {
     'Access-Control-Allow-Origin':  '*',
@@ -40,27 +54,58 @@ const CORS = {
     'Access-Control-Allow-Headers': 'Content-Type',
 };
 
+// ── Gemini call ───────────────────────────────────────────────────────────────
+async function callGemini(apiKey, systemPrompt, userMessage, maxTokens = 300, temperature = 0.7) {
+    const res = await fetch(`${GEMINI_URL}?key=${apiKey}`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            system_instruction: { parts: [{ text: systemPrompt }] },
+            contents:           [{ parts: [{ text: userMessage }] }],
+            generationConfig: {
+                maxOutputTokens: maxTokens,
+                temperature,
+                topP: 0.9,
+            },
+            safetySettings: [
+                { category: 'HARM_CATEGORY_HARASSMENT',        threshold: 'BLOCK_NONE' },
+                { category: 'HARM_CATEGORY_HATE_SPEECH',       threshold: 'BLOCK_NONE' },
+                { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+                { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
+            ],
+        }),
+    });
+
+    if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`Gemini API ${res.status}: ${errText}`);
+    }
+
+    const data   = await res.json();
+    const report = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+
+    if (!report) {
+        const reason = data?.candidates?.[0]?.finishReason ?? 'unknown';
+        throw new Error(`Empty Gemini response (finishReason: ${reason})`);
+    }
+
+    return report;
+}
+
 // ── Handler ───────────────────────────────────────────────────────────────────
 exports.handler = async (event) => {
     if (event.httpMethod === 'OPTIONS') {
         return { statusCode: 204, headers: CORS, body: '' };
     }
-
     if (event.httpMethod !== 'POST') {
         return { statusCode: 405, headers: CORS, body: JSON.stringify({ error: 'Method Not Allowed' }) };
     }
 
-    // ── Validate API key ──────────────────────────────────────────────────────
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
-        return {
-            statusCode: 500,
-            headers: CORS,
-            body: JSON.stringify({ error: 'GEMINI_API_KEY is not configured.' }),
-        };
+        return { statusCode: 500, headers: CORS, body: JSON.stringify({ error: 'GEMINI_API_KEY not configured.' }) };
     }
 
-    // ── Parse body ────────────────────────────────────────────────────────────
     let body;
     try {
         body = JSON.parse(event.body || '{}');
@@ -68,72 +113,36 @@ exports.handler = async (event) => {
         return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: 'Invalid JSON body' }) };
     }
 
-    const { date, peakMrh } = body;
+    const { date, peakMrh, isAnomaly } = body;
     if (!date || peakMrh == null) {
-        return {
-            statusCode: 400,
-            headers: CORS,
-            body: JSON.stringify({ error: 'Required fields: date, peakMrh' }),
-        };
+        return { statusCode: 400, headers: CORS, body: JSON.stringify({ error: 'Required: date, peakMrh' }) };
     }
 
-    // ── Build user message ────────────────────────────────────────────────────
-    const userMessage =
-        `ANOMALY REPORT\n` +
-        `DATE:      ${date}\n` +
-        `LOCATION:  Tbilisi, Georgia (UTC+4)\n` +
-        `PEAK:      ${Number(peakMrh).toFixed(2)} µRh/h\n` +
-        `\nInitiate forensic analysis.`;
-
-    // ── Call Gemini 1.5 Flash ─────────────────────────────────────────────────
     let report;
     try {
-        const res = await fetch(`${GEMINI_URL}?key=${apiKey}`, {
-            method:  'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                system_instruction: {
-                    parts: [{ text: SYSTEM_PROMPT }],
-                },
-                contents: [{
-                    parts: [{ text: userMessage }],
-                }],
-                generationConfig: {
-                    maxOutputTokens: 350,
-                    temperature:     0.65,
-                    topP:            0.9,
-                },
-                safetySettings: [
-                    { category: 'HARM_CATEGORY_HARASSMENT',        threshold: 'BLOCK_NONE' },
-                    { category: 'HARM_CATEGORY_HATE_SPEECH',       threshold: 'BLOCK_NONE' },
-                    { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-                    { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
-                ],
-            }),
-        });
+        if (isAnomaly) {
+            // ── Mode A: Forensic analysis of anomaly ──────────────────────────
+            const userMessage =
+                `ANOMALY REPORT\n` +
+                `DATE:      ${date}\n` +
+                `LOCATION:  Tbilisi, Georgia (UTC+4)\n` +
+                `PEAK:      ${Number(peakMrh).toFixed(2)} µRh/h\n` +
+                `\nInitiate forensic analysis.`;
 
-        if (!res.ok) {
-            const errText = await res.text();
-            throw new Error(`Gemini API ${res.status}: ${errText}`);
+            report = await callGemini(apiKey, FORENSIC_PROMPT, userMessage, 350, 0.65);
+        } else {
+            // ── Mode B: Sarcastic all-clear one-liner ─────────────────────────
+            const userMessage =
+                `STATUS REPORT\n` +
+                `DATE:    ${date}\n` +
+                `READING: ${Number(peakMrh).toFixed(2)} µRh/h (NORMAL — within baseline)\n` +
+                `\nProvide your assessment.`;
+
+            report = await callGemini(apiKey, SARCASTIC_PROMPT, userMessage, 80, 0.95);
         }
-
-        const data = await res.json();
-
-        // Extract text from Gemini response structure
-        report = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-
-        if (!report) {
-            const finishReason = data?.candidates?.[0]?.finishReason;
-            throw new Error(`Empty response from Gemini (finishReason: ${finishReason ?? 'unknown'})`);
-        }
-
     } catch (err) {
         console.error('Gemini call failed:', err.message);
-        return {
-            statusCode: 502,
-            headers: CORS,
-            body: JSON.stringify({ error: `AI provider error: ${err.message}` }),
-        };
+        return { statusCode: 502, headers: CORS, body: JSON.stringify({ error: `AI error: ${err.message}` }) };
     }
 
     return {

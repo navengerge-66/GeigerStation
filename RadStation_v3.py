@@ -302,6 +302,22 @@ class SupabaseUploader:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
+    def ping(self, queue_depth: int = 0):
+        """
+        Upsert a heartbeat row into system_status every 5 minutes.
+        The dashboard checks this to detect a lost Pi connection.
+        """
+        if not self._enabled:
+            return
+        try:
+            self._client.table("system_status").upsert({
+                "station_id":  "tbilisi-01",
+                "last_seen":   pd.Timestamp.utcnow().isoformat() + "+00:00",
+                "queue_depth": queue_depth,
+            }).execute()
+        except Exception as e:
+            log.warning(f"Supabase heartbeat ping failed: {e}")
+
     def push(self, avg_mrh: float, ts: str):
         """
         Called once per minute from minute_processing().
@@ -818,6 +834,7 @@ uploader  = SupabaseUploader()
 
 schedule.every(1).minutes.do(minute_processing)
 schedule.every(1).minutes.do(watchdog)
+schedule.every(5).minutes.do(lambda: uploader.ping(uploader.queue_depth))
 schedule.every(24).hours.do(smart_cleanup)
 schedule.every().hour.at(":58").do(lambda: do_report('hourly'))
 schedule.every().day.at("23:55").do(lambda: do_report('daily'))
