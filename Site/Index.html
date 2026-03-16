@@ -200,7 +200,7 @@
 // =============================================================================
 const SUPABASE_URL      = 'YOUR_SUPABASE_URL';       // e.g. https://xxxx.supabase.co
 const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';  // starts with "eyJ..."
-const AI_ENDPOINT       = '/.netlify/functions/analyze-anomaly';
+const AI_ENDPOINT       = '/.netlify/functions/investigate';
 // =============================================================================
 
 // ── Supabase client ───────────────────────────────────────────────────────────
@@ -498,22 +498,48 @@ function renderDailyChart(rows, dateStr) {
     });
 }
 
+// ── Typing animation ──────────────────────────────────────────────────────────
+function typeText(element, text, speed = 16) {
+    return new Promise(resolve => {
+        element.innerHTML = '';
+        // Pre-process: bold markdown and newlines
+        const tokens = text.split(/(\*\*.*?\*\*|\n)/g);
+        const rendered = tokens.map(t => {
+            if (t === '\n')                   return '<br>';
+            if (/^\*\*.*\*\*$/.test(t))       return `<strong>${t.slice(2, -2)}</strong>`;
+            return t;
+        });
+        // Flatten to character-level array preserving HTML tags as atomic units
+        const chars = [];
+        rendered.forEach(chunk => {
+            if (chunk.startsWith('<')) {
+                chars.push(chunk); // push whole HTML tag as one unit
+            } else {
+                chars.push(...chunk.split(''));
+            }
+        });
+
+        let i = 0;
+        const id = setInterval(() => {
+            if (i < chars.length) {
+                element.innerHTML += chars[i++];
+            } else {
+                clearInterval(id);
+                resolve();
+            }
+        }, speed);
+    });
+}
+
 // ── Call the AI Netlify function ──────────────────────────────────────────────
-async function callAI({ dateStr, peakMrh, avgMrh, hourlyProfile, readingCount }) {
+async function callAI({ dateStr, peakMrh }) {
     setAIState('loading');
 
     try {
         const res = await fetch(AI_ENDPOINT, {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({
-                date:          dateStr,
-                peakMrh:       peakMrh,
-                avgMrh:        avgMrh,
-                backgroundMrh: avgMrh,   // daily avg used as context baseline
-                readingCount:  readingCount,
-                hourlyProfile: hourlyProfile,
-            }),
+            body:    JSON.stringify({ date: dateStr, peakMrh }),
         });
 
         if (!res.ok) {
@@ -521,8 +547,10 @@ async function callAI({ dateStr, peakMrh, avgMrh, hourlyProfile, readingCount })
             throw new Error(errData.error || `HTTP ${res.status}`);
         }
 
-        const { analysis } = await res.json();
-        setAIState('done', analysis);
+        const { report } = await res.json();
+        setAIState('typing');
+        await typeText(document.getElementById('ai-body'), report);
+        setAIState('done');
         document.getElementById('ai-retry').classList.add('hidden');
 
     } catch (e) {
@@ -550,19 +578,20 @@ function setAIState(state, text = '') {
         loader.classList.remove('hidden');
         report.classList.add('hidden');
         dot.classList.add('blink');
+        dot.style.background = '';
+    } else if (state === 'typing') {
+        // typeText() fills ai-body; dot blinks amber during typing
+        dot.classList.add('blink');
+        dot.style.background = '#ffaa00';
     } else if (state === 'done') {
         dot.classList.remove('blink');
         dot.style.background = '#33ff33';
-        // Render line-breaks and basic bold markdown
-        body.innerHTML = text
-            .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-            .replace(/\n/g, '<br>');
     } else if (state === 'error') {
         dot.classList.remove('blink');
         dot.style.background = '#ff3333';
-        body.innerHTML = `<span class="text-red-400">ERROR: ${text}</span>`;
+        body.innerHTML = `<span class="text-red-400">// ERROR: ${text}</span>`;
     } else {
-        // waiting
+        // waiting / idle
         dot.classList.remove('blink');
         dot.style.background = '';
         body.innerHTML = 'Awaiting data selection.<br>Click an <span style="color:var(--amber)">orange</span> event node to begin investigation.';

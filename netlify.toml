@@ -9,9 +9,8 @@
 #   SUPABASE_ANON_KEY     Supabase anonymous/public key (read-only, safe to
 #                         expose in browser JS — protected by RLS)
 #
-#   OPENAI_API_KEY        OpenAI secret key (server-side only, never exposed)
-#     -- OR --
-#   ANTHROPIC_API_KEY     Anthropic secret key (preferred if both are set)
+#   GEMINI_API_KEY        Google AI Studio key (server-side only, never exposed)
+#                         Get one free at: aistudio.google.com/apikey
 #
 # Pi-side environment variables (set in /etc/systemd/system/radstation.service):
 #   SUPABASE_URL          Same project URL
