@@ -81,8 +81,13 @@ async function callGemini(apiKey, systemPrompt, userMessage, maxTokens = 300, te
         throw new Error(`Gemini API ${res.status}: ${errText}`);
     }
 
-    const data   = await res.json();
-    const report = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+    const data  = await res.json();
+
+    // Gemini 2.5 Flash returns thinking tokens as parts with { thought: true }.
+    // Skip those and take the first non-thought text part as the actual reply.
+    const parts  = data?.candidates?.[0]?.content?.parts ?? [];
+    const actual = parts.find(p => p.text && !p.thought);
+    const report = actual?.text?.trim();
 
     if (!report) {
         const reason = data?.candidates?.[0]?.finishReason ?? 'unknown';
