@@ -134,18 +134,38 @@ log "info" "Syntax check passed."
 # ── Step 5: Restart service (only if the Python script changed) ───────────────
 if [[ "$PYTHON_CHANGED" -gt 0 ]]; then
     log "info" "Python script changed. Restarting service..."
+
+    # Record the PID that is running BEFORE the restart so we can confirm
+    # the process was actually replaced (not just still active from before).
+    OLD_PID=$(systemctl show "$SERVICE" --property=MainPID --value 2>/dev/null || echo "0")
+    log "info" "Pre-restart PID: ${OLD_PID}"
+
     systemctl restart "$SERVICE"
 
     log "info" "Waiting ${HEALTH_WAIT}s for health check..."
     sleep "$HEALTH_WAIT"
 
     # ── Step 6: Health check ──────────────────────────────────────────────────
-    if systemctl is-active --quiet "$SERVICE"; then
-        log "notice" "Health check PASSED. Update ${REMOTE:0:7} deployed successfully."
-        tg_notify "✅ *RadStation updated* to \`${REMOTE:0:7}\`. Service healthy."
+    # Two conditions must BOTH be true for a genuine successful restart:
+    #   1. Service reports active (not failed / activating / crash-looping)
+    #   2. MainPID changed — proves the process was actually replaced.
+    #      If PID is unchanged, systemctl restart silently failed or
+    #      the service is in a rapid crash-restart loop and happened to
+    #      recycle the same PID — both are error conditions.
+    NEW_PID=$(systemctl show "$SERVICE" --property=MainPID --value 2>/dev/null || echo "0")
+    log "info" "Post-restart PID: ${NEW_PID}"
+
+    if systemctl is-active --quiet "$SERVICE" \
+        && [[ "$NEW_PID" != "0" && "$NEW_PID" != "$OLD_PID" ]]; then
+        log "notice" "Health check PASSED (PID ${OLD_PID} → ${NEW_PID}). Update ${REMOTE:0:7} deployed."
+        tg_notify "✅ *RadStation updated* to \`${REMOTE:0:7}\`. Service healthy \(PID ${NEW_PID}\)\."
         rm -f "${SCRIPT_NAME}.backup"
     else
-        log "err" "Health check FAILED (service inactive after ${HEALTH_WAIT}s). Rolling back."
+        if [[ "$NEW_PID" == "$OLD_PID" ]]; then
+            log "err" "Health check FAILED — PID unchanged (${OLD_PID}). Service did not restart."
+        else
+            log "err" "Health check FAILED — service inactive after ${HEALTH_WAIT}s."
+        fi
         rollback "$LOCAL"
         exit 1
     fi
