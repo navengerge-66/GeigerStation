@@ -85,7 +85,7 @@ fi
 
 sudo -u "$SERVICE_USER" "${VENV_DIR}/bin/pip" install --quiet --upgrade pip
 sudo -u "$SERVICE_USER" "${VENV_DIR}/bin/pip" install --quiet --upgrade \
-    pyserial schedule pandas numpy matplotlib scipy requests
+    -r "${INSTALL_DIR}/requirements.txt"
 ok "Python packages installed into venv."
 
 # ── Step 4: Telegram credentials ──────────────────────────────────────────────

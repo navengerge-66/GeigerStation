@@ -1,0 +1,20 @@
+# GeigerStation — Raspberry Pi Python dependencies
+# Install into the venv: venv/bin/pip install -r requirements.txt
+
+# Serial communication
+pyserial>=3.5
+
+# Task scheduling
+schedule>=1.2
+
+# Data processing
+pandas>=2.0
+numpy>=1.24
+scipy>=1.11
+
+# Plotting (Agg backend, headless)
+matplotlib>=3.7
+
+# HTTP / Telegram bot / Supabase
+requests>=2.31
+supabase>=2.3.0

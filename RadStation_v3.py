@@ -32,7 +32,15 @@ import time
 import csv
 import logging
 from enum import Enum
+from collections import deque
 import serial
+
+# Supabase is optional — the script runs in local-only mode if not installed.
+try:
+    from supabase import create_client as _supa_create_client
+    _SUPABASE_AVAILABLE = True
+except ImportError:
+    _SUPABASE_AVAILABLE = False
 import schedule
 import pandas as pd
 import numpy as np
@@ -83,6 +91,14 @@ BAUD_RATE   = 19200
 ALERT_THRESHOLD       = 50.0
 INTERESTING_THRESHOLD = 28.0
 CLEANUP_DAYS          = 30
+
+# Supabase cloud sync (set via environment variables or systemd unit override)
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")   # service_role key
+
+# Relative anomaly: reading > ANOMALY_MULTIPLIER × rolling background average
+ANOMALY_MULTIPLIER      = 2.5
+ANOMALY_BACKGROUND_SIZE = 100   # last N minute-averages used as background
 
 # ── Global state ──────────────────────────────────────────────────────────────
 ram_buffer      = []
@@ -251,6 +267,108 @@ class LogWriter:
                     csv.writer(f).writerows(batch)
             except OSError as e:
                 log.error(f"CSV write failed ({fname}): {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SupabaseUploader
+#
+# Pushes one row per minute to the `geiger_logs` table.
+# Anomaly detection: compares the new minute-average against a rolling window
+# of the last ANOMALY_BACKGROUND_SIZE minute-averages (≈ last 100 minutes).
+# If the new value exceeds ANOMALY_MULTIPLIER × background, is_anomaly=True.
+#
+# Offline resilience: failed uploads are queued (up to 500 rows ≈ ~8 h) and
+# flushed automatically on the next successful network round-trip.
+# ─────────────────────────────────────────────────────────────────────────────
+class SupabaseUploader:
+    def __init__(self):
+        self._client     = None
+        self._enabled    = False
+        self._queue      = deque(maxlen=500)                       # offline buffer
+        self._background = deque(maxlen=ANOMALY_BACKGROUND_SIZE)   # rolling baseline
+
+        if not _SUPABASE_AVAILABLE:
+            log.warning("SupabaseUploader: supabase-py not installed — cloud sync disabled.")
+            return
+        if not (SUPABASE_URL and SUPABASE_KEY):
+            log.warning("SupabaseUploader: SUPABASE_URL/KEY not set — cloud sync disabled.")
+            return
+        try:
+            self._client  = _supa_create_client(SUPABASE_URL, SUPABASE_KEY)
+            self._enabled = True
+            log.info("SupabaseUploader: connected to Supabase.")
+        except Exception as e:
+            log.error(f"SupabaseUploader init failed: {e}", exc_info=True)
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def push(self, avg_mrh: float, ts: str):
+        """
+        Called once per minute from minute_processing().
+        ts must be an ISO-8601 string with UTC timezone offset.
+        Anomaly check runs BEFORE the value is added to the background window
+        so the current reading is not part of its own baseline.
+        """
+        anomaly = self._is_anomaly(avg_mrh)
+
+        if anomaly:
+            bg = self._background_avg()
+            log.warning(
+                f"Relative anomaly: {avg_mrh:.2f} µRh/h "
+                f"(bg avg: {bg:.2f}, ratio: {avg_mrh / bg:.1f}×)"
+            )
+
+        # Add to background AFTER the check
+        self._background.append(avg_mrh)
+
+        payload = {
+            "created_at": ts,
+            "mrh_value":  round(float(avg_mrh), 4),
+            "is_anomaly": anomaly,
+        }
+
+        if not self._enabled:
+            return
+
+        # Flush any previously queued rows first, then push current row.
+        self._flush_queue()
+        if not self._upload_one(payload):
+            self._queue.append(payload)
+            log.warning(f"Supabase push failed — queued ({len(self._queue)} pending).")
+
+    @property
+    def queue_depth(self) -> int:
+        return len(self._queue)
+
+    # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _background_avg(self) -> float:
+        if len(self._background) < 5:   # wait for a meaningful sample
+            return 0.0
+        return sum(self._background) / len(self._background)
+
+    def _is_anomaly(self, value: float) -> bool:
+        bg = self._background_avg()
+        return bg > 0 and value > ANOMALY_MULTIPLIER * bg
+
+    def _upload_one(self, payload: dict) -> bool:
+        try:
+            self._client.table("geiger_logs").insert(payload).execute()
+            return True
+        except Exception as e:
+            log.warning(f"Supabase upload error: {e}")
+            return False
+
+    def _flush_queue(self):
+        flushed = 0
+        while self._queue:
+            if self._upload_one(self._queue[0]):
+                self._queue.popleft()
+                flushed += 1
+            else:
+                break   # network still down — stop so we don't waste time
+        if flushed:
+            log.info(f"Supabase: flushed {flushed} queued record(s).")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -563,6 +681,12 @@ def minute_processing():
         logger.batch_log(list(ram_buffer))
         ram_buffer = []
 
+    # ── Cloud sync ────────────────────────────────────────────────────────────
+    # Push the minute-average to Supabase (fire-and-forget in a daemon thread
+    # so a slow network never stalls the main schedule loop).
+    _ts_utc = pd.Timestamp.now(tz='UTC').isoformat()
+    Thread(target=uploader.push, args=(current_avg_cached, _ts_utc), daemon=True).start()
+
     # FIX #5: send Telegram alerts in background threads so a slow/down
     # network does not block the main schedule loop for up to 15 s.
     now = time.time()
@@ -690,6 +814,7 @@ messenger = TeleMessenger(TOKEN, CHAT_IDS)
 reader    = SerialReader(SERIAL_PORT, BAUD_RATE)
 logger    = LogWriter(LOG_PATH)
 engine    = StatsEngine()
+uploader  = SupabaseUploader()
 
 schedule.every(1).minutes.do(minute_processing)
 schedule.every(1).minutes.do(watchdog)

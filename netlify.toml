@@ -1,0 +1,52 @@
+# =============================================================================
+# netlify.toml — GeigerStation Netlify deployment config
+#
+# Required environment variables (set in Netlify UI → Site → Environment):
+#
+#   SUPABASE_URL          Full Supabase project URL
+#                         e.g. https://xxxxxxxxxxxx.supabase.co
+#
+#   SUPABASE_ANON_KEY     Supabase anonymous/public key (read-only, safe to
+#                         expose in browser JS — protected by RLS)
+#
+#   OPENAI_API_KEY        OpenAI secret key (server-side only, never exposed)
+#     -- OR --
+#   ANTHROPIC_API_KEY     Anthropic secret key (preferred if both are set)
+#
+# Pi-side environment variables (set in /etc/systemd/system/radstation.service):
+#   SUPABASE_URL          Same project URL
+#   SUPABASE_KEY          Supabase service_role key (bypasses RLS for inserts)
+# =============================================================================
+
+[build]
+  publish   = "Site"
+  functions = "netlify/functions"
+
+  # Node 18+ is required for native fetch in the AI function
+  [build.environment]
+    NODE_VERSION = "18"
+
+[functions]
+  node_bundler = "esbuild"
+
+# ── Security headers ──────────────────────────────────────────────────────────
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options           = "DENY"
+    X-Content-Type-Options    = "nosniff"
+    Referrer-Policy           = "strict-origin-when-cross-origin"
+    Permissions-Policy        = "camera=(), microphone=(), geolocation=()"
+
+# ── Cache strategy ────────────────────────────────────────────────────────────
+# HTML: always revalidated (dashboard data must be fresh)
+[[headers]]
+  for = "/*.html"
+  [headers.values]
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+# Static assets: long-lived
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
