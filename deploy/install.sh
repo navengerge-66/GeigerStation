@@ -37,7 +37,7 @@ step() { printf "\n${YELLOW}▶ %s${NC}\n" "$*"; }
 
 # ── Step 1: System packages ───────────────────────────────────────────────────
 step "Installing system packages"
-apt-get update -qq
+apt-get update --allow-releaseinfo-change -qq
 apt-get install -y --no-install-recommends git python3-pip python3-venv curl
 ok "System packages ready."
 
