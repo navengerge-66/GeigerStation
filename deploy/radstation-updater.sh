@@ -5,8 +5,9 @@
 # Triggered by: radstation-updater.timer (every 15 minutes)
 #
 # Update flow:
-#   git fetch → compare hashes → backup → pull → syntax check →
-#   restart service → health check (45 s) → rollback on failure
+#   git fetch → compare hashes → log changed files → backup → pull →
+#   syntax check → restart service (always) → PID-verified health check
+#   (45 s) → rollback on failure
 #
 # Rollback levels
 # ───────────────
@@ -97,11 +98,9 @@ if [[ "$LOCAL" == "$REMOTE" ]]; then
     exit 0
 fi
 
-log "notice" "Update detected: ${LOCAL:0:7} → ${REMOTE:0:7}"
-
-# Determine whether the runtime Python script actually changed in this delta.
-# If only the .ino or README changed, we can skip the service restart.
-PYTHON_CHANGED=$(git diff --name-only "$LOCAL" "$REMOTE" | grep -c "^${SCRIPT_NAME}$" || true)
+# List every file that changed so we can log it for traceability
+CHANGED_FILES=$(git diff --name-only "$LOCAL" "$REMOTE" | tr '\n' ' ')
+log "notice" "Update detected: ${LOCAL:0:7} → ${REMOTE:0:7} | changed: ${CHANGED_FILES}"
 
 # ── Step 2: Back up the current working script ────────────────────────────────
 cp "${SCRIPT_NAME}" "${SCRIPT_NAME}.backup"
@@ -131,50 +130,45 @@ fi
 
 log "info" "Syntax check passed."
 
-# ── Step 5: Restart service (only if the Python script changed) ───────────────
-if [[ "$PYTHON_CHANGED" -gt 0 ]]; then
-    log "info" "Python script changed. Restarting service..."
+# ── Step 5: Restart service ───────────────────────────────────────────────────
+# Always restart on any detected change — even a docs or firmware-only update
+# guarantees the running process is in sync with the repo state on disk.
+# This eliminates the entire class of "file updated but old code still in
+# memory" bugs without any conditional logic to get wrong.
+log "info" "Restarting service to load new code..."
 
-    # Record the PID that is running BEFORE the restart so we can confirm
-    # the process was actually replaced (not just still active from before).
-    OLD_PID=$(systemctl show "$SERVICE" --property=MainPID --value 2>/dev/null || echo "0")
-    log "info" "Pre-restart PID: ${OLD_PID}"
+# Record the pre-restart PID so the health check can verify the process
+# was actually replaced and not just left running from before.
+OLD_PID=$(systemctl show "$SERVICE" --property=MainPID --value 2>/dev/null || echo "0")
+log "info" "Pre-restart PID: ${OLD_PID}"
 
-    systemctl restart "$SERVICE"
+systemctl restart "$SERVICE"
 
-    log "info" "Waiting ${HEALTH_WAIT}s for health check..."
-    sleep "$HEALTH_WAIT"
+log "info" "Waiting ${HEALTH_WAIT}s for health check..."
+sleep "$HEALTH_WAIT"
 
-    # ── Step 6: Health check ──────────────────────────────────────────────────
-    # Two conditions must BOTH be true for a genuine successful restart:
-    #   1. Service reports active (not failed / activating / crash-looping)
-    #   2. MainPID changed — proves the process was actually replaced.
-    #      If PID is unchanged, systemctl restart silently failed or
-    #      the service is in a rapid crash-restart loop and happened to
-    #      recycle the same PID — both are error conditions.
-    NEW_PID=$(systemctl show "$SERVICE" --property=MainPID --value 2>/dev/null || echo "0")
-    log "info" "Post-restart PID: ${NEW_PID}"
+# ── Step 6: Health check ──────────────────────────────────────────────────────
+# Both conditions must be true for a genuine successful restart:
+#   1. Service is active (not failed / activating / crash-looping)
+#   2. MainPID changed — proves the old process was replaced by a new one.
+#      PID unchanged means systemctl restart failed silently or the service
+#      is crash-looping fast enough to reuse the same PID — both are failures.
+NEW_PID=$(systemctl show "$SERVICE" --property=MainPID --value 2>/dev/null || echo "0")
+log "info" "Post-restart PID: ${NEW_PID}"
 
-    if systemctl is-active --quiet "$SERVICE" \
-        && [[ "$NEW_PID" != "0" && "$NEW_PID" != "$OLD_PID" ]]; then
-        log "notice" "Health check PASSED (PID ${OLD_PID} → ${NEW_PID}). Update ${REMOTE:0:7} deployed."
-        tg_notify "✅ *RadStation updated* to \`${REMOTE:0:7}\`. Service healthy \(PID ${NEW_PID}\)\."
-        rm -f "${SCRIPT_NAME}.backup"
-    else
-        if [[ "$NEW_PID" == "$OLD_PID" ]]; then
-            log "err" "Health check FAILED — PID unchanged (${OLD_PID}). Service did not restart."
-        else
-            log "err" "Health check FAILED — service inactive after ${HEALTH_WAIT}s."
-        fi
-        rollback "$LOCAL"
-        exit 1
-    fi
-
-else
-    # Non-runtime change (firmware, docs, etc.) — no restart needed
-    log "notice" "No Python changes in ${REMOTE:0:7}. Skipping service restart."
-    tg_notify "✅ *RadStation*: Non-runtime update \`${REMOTE:0:7}\` applied (no restart needed)."
+if systemctl is-active --quiet "$SERVICE" \
+    && [[ "$NEW_PID" != "0" && "$NEW_PID" != "$OLD_PID" ]]; then
+    log "notice" "Health check PASSED (PID ${OLD_PID} → ${NEW_PID}). Update ${REMOTE:0:7} deployed."
+    tg_notify "✅ *RadStation updated* to \`${REMOTE:0:7}\`. Service healthy \(PID ${NEW_PID}\)\."
     rm -f "${SCRIPT_NAME}.backup"
+else
+    if [[ "$NEW_PID" == "$OLD_PID" ]]; then
+        log "err" "Health check FAILED — PID unchanged (${OLD_PID}). Service did not restart."
+    else
+        log "err" "Health check FAILED — service inactive after ${HEALTH_WAIT}s."
+    fi
+    rollback "$LOCAL"
+    exit 1
 fi
 
 exit 0
