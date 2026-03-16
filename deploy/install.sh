@@ -45,9 +45,25 @@ ok "System packages ready."
 # ── Step 2: Clone or update repo ──────────────────────────────────────────────
 step "Setting up repository at ${INSTALL_DIR}"
 if [[ -d "${INSTALL_DIR}/.git" ]]; then
-    warn "Repo already exists — pulling latest."
+    # Already a git repo — just pull the latest commits
+    warn "Repo already initialised — pulling latest."
     sudo -u "$SERVICE_USER" git -C "$INSTALL_DIR" pull --quiet
+
+elif [[ -d "$INSTALL_DIR" ]]; then
+    # Directory exists with data but is NOT yet a git repo.
+    # Initialise git in-place so existing .csv / .log files are never touched.
+    # git only writes the files that are tracked in the remote (py, ino, etc.).
+    warn "Directory exists with data. Initialising git repo in place..."
+    sudo -u "$SERVICE_USER" git -C "$INSTALL_DIR" init --quiet
+    sudo -u "$SERVICE_USER" git -C "$INSTALL_DIR" remote add origin "$REPO_URL"
+    sudo -u "$SERVICE_USER" git -C "$INSTALL_DIR" fetch origin main --quiet
+    # -f overwrites any pre-existing tracked files (e.g. an old RadStation.py)
+    # with the canonical versions from GitHub; untracked data files are ignored.
+    sudo -u "$SERVICE_USER" git -C "$INSTALL_DIR" checkout -f -b main origin/main
+    ok "Git repo initialised inside existing data directory."
+
 else
+    # Fresh install — nothing in the way, plain clone
     sudo -u "$SERVICE_USER" git clone "$REPO_URL" "$INSTALL_DIR"
 fi
 
