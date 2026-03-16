@@ -266,9 +266,19 @@ async function fetchLive() {
             .select('mrh_value, is_anomaly, created_at')
             .order('created_at', { ascending: false })
             .limit(1)
-            .single();
+            .maybeSingle();
 
+        // maybeSingle() returns error only on real failures; data=null means empty table
         if (error) throw error;
+
+        if (!data) {
+            // Connected OK but no readings yet — station not yet transmitting
+            document.getElementById('live-value').textContent  = '--';
+            document.getElementById('last-update').textContent = 'NO DATA';
+            document.getElementById('anomaly-badge').classList.add('hidden');
+            setUplink(true);   // connection is fine, data just hasn't arrived
+            return;
+        }
 
         const val = Number(data.mrh_value);
         document.getElementById('live-value').textContent = val.toFixed(2);
@@ -308,13 +318,15 @@ async function fetchTrend() {
         const values = rows.map(r => r.mrh_value);
         const avg    = values.length ? (values.reduce((a, b) => a + b, 0) / values.length).toFixed(2) : '--';
 
-        hourlyChart.data.labels                 = labels;
-        hourlyChart.data.datasets[0].data       = values;
-        hourlyChart.options.scales.y.suggestedMin = Math.max(0, Math.min(...values) * 0.8);
-        hourlyChart.options.scales.y.suggestedMax = Math.max(...values) * 1.15;
+        hourlyChart.data.labels           = labels;
+        hourlyChart.data.datasets[0].data = values;
+        if (values.length) {
+            hourlyChart.options.scales.y.suggestedMin = Math.max(0, Math.min(...values) * 0.8);
+            hourlyChart.options.scales.y.suggestedMax = Math.max(...values) * 1.15;
+        }
         hourlyChart.update('none');
 
-        document.getElementById('trend-avg').textContent = `AVG: ${avg} µRh/h`;
+        document.getElementById('trend-avg').textContent = values.length ? `AVG: ${avg} µRh/h` : 'AWAITING FEED';
     } catch (e) {
         console.warn('fetchTrend error:', e.message);
     }
