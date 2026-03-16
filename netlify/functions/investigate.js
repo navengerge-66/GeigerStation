@@ -1,5 +1,5 @@
 /**
- * investigate.js — Nuclear Forensics AI via Gemini 1.5 Flash
+ * investigate.js — Nuclear Forensics AI via Gemini 2.5 Flash
  *
  * POST /.netlify/functions/investigate
  *
@@ -18,7 +18,7 @@
  */
 
 const GEMINI_URL =
-    'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
 
 // ── Mode A: Anomaly — serious nuclear forensics ───────────────────────────────
 const FORENSIC_PROMPT =
