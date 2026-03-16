@@ -42,3 +42,6 @@ supabase/.branches/
 .env.local
 .env.*.local
 .env.keys
+
+# Local Netlify folder
+.netlify

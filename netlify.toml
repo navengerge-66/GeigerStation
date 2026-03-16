@@ -20,7 +20,7 @@
 [build]
   # Inject Supabase credentials into the HTML at build time.
   # SUPABASE_URL and SUPABASE_ANON_KEY must be set in Netlify UI → Site → Environment variables.
-  command   = "sed -i \"s|YOUR_SUPABASE_URL|$SUPABASE_URL|g\" Site/Index.html && sed -i \"s|YOUR_SUPABASE_ANON_KEY|$SUPABASE_ANON_KEY|g\" Site/Index.html"
+  command   = "node scripts/inject-config.js"
   publish   = "Site"
   functions = "netlify/functions"
 
