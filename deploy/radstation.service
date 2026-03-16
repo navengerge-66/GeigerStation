@@ -34,8 +34,10 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=radstation
 
-# Token must be set here — never hard-code credentials in the Python source
-Environment="TELEGRAM_TOKEN=YOUR_TOKEN_HERE"
+# Credentials — set real values directly on the Pi, never commit them to git
+Environment="TELEGRAM_TOKEN=YOUR_TELEGRAM_TOKEN"
+Environment="SUPABASE_URL=https://YOUR_PROJECT_REF.supabase.co"
+Environment="SUPABASE_KEY=YOUR_SERVICE_ROLE_KEY"
 
 # Niceness: run slightly below default priority so the OS stays responsive
 Nice=5
