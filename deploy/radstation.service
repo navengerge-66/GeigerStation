@@ -1,0 +1,44 @@
+# /etc/systemd/system/radstation.service
+#
+# Main RadStation monitoring service.
+# Restart behaviour:  always restart, with a 15 s back-off, max 5 times in
+# 2 minutes before systemd gives up and the updater's rollback logic takes over.
+
+[Unit]
+Description=RadStation Geiger Counter Monitor
+Documentation=https://github.com/navengerge-66/GeigerStation
+# Wait until the network stack is fully up (Bluetooth serial may need it)
+After=network-online.target
+Wants=network-online.target
+# Ensure the updater does not run at the same time as a restart
+After=radstation-updater.service
+
+[Service]
+Type=simple
+User=navenger
+WorkingDirectory=/home/navenger/radstat
+
+ExecStart=/usr/bin/python3 -u /home/navenger/radstat/RadStation_v3.py
+
+# Restart unconditionally — covers crashes, OOM kills, and unhandled exceptions.
+# The updater's health check relies on this: if the new code crashes on start,
+# systemd will retry up to StartLimitBurst times, then give up; the health check
+# detects the inactive state and triggers rollback.
+Restart=always
+RestartSec=15
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+# Capture stdout/stderr to journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=radstation
+
+# Token must be set here — never hard-code credentials in the Python source
+Environment="TELEGRAM_TOKEN=YOUR_TOKEN_HERE"
+
+# Niceness: run slightly below default priority so the OS stays responsive
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

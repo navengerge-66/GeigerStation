@@ -1,0 +1,39 @@
+# /etc/systemd/system/radstation-updater.service
+#
+# One-shot service that runs the update script.
+# Triggered by radstation-updater.timer on a schedule.
+# Can also be run manually: sudo systemctl start radstation-updater.service
+
+[Unit]
+Description=RadStation Auto-Updater (one-shot)
+Documentation=https://github.com/navengerge-66/GeigerStation
+After=network-online.target
+Wants=network-online.target
+# Do not attempt an update while the main service is mid-restart
+After=radstation.service
+
+[Service]
+Type=oneshot
+
+# Run as the same user who owns the repo clone
+User=navenger
+
+# PATH must include git and python3
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Pass the Telegram credentials so the updater can send notifications.
+# These should match the values set in radstation.service.
+Environment="TELEGRAM_TOKEN=YOUR_TOKEN_HERE"
+Environment="CHAT_ID=YOUR_CHAT_ID_HERE"
+
+ExecStart=/usr/local/bin/radstation-updater.sh
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=radstation-updater
+
+# Give the script enough time to pull, restart, and wait for the health check
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,30 @@
+# /etc/systemd/system/radstation-updater.timer
+#
+# Fires radstation-updater.service every 15 minutes.
+#
+# Persistent=true  → if the Pi was powered off when a fire was due, the timer
+#                    runs the unit once at next boot to catch up.
+# RandomizedDelaySec → spreads load if you ever run multiple Pi units so they
+#                      don't all hammer GitHub at the exact same second.
+
+[Unit]
+Description=Run RadStation Auto-Updater every 15 minutes
+Documentation=https://github.com/navengerge-66/GeigerStation
+
+[Timer]
+# First fire: 3 minutes after boot (gives network time to settle)
+OnBootSec=3min
+
+# Then every 15 minutes
+OnUnitActiveSec=15min
+
+# Spread the exact fire time by up to 60 seconds at random
+RandomizedDelaySec=60
+
+# Catch up on any fires that were missed while the Pi was off
+Persistent=true
+
+Unit=radstation-updater.service
+
+[Install]
+WantedBy=timers.target
