@@ -17,8 +17,12 @@
  *   GEMINI_API_KEY   — Google AI Studio key (aistudio.google.com/apikey)
  */
 
-const GEMINI_URL =
+// Forensic mode needs the full model; sarcastic one-liners use Flash-Lite
+// (much higher free-tier quota: ~1 000 RPD vs 20 RPD for 2.5-flash).
+const GEMINI_URL_FLASH =
     'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
+const GEMINI_URL_LITE =
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent';
 
 // ── Mode A: Anomaly — serious nuclear forensics ───────────────────────────────
 const FORENSIC_PROMPT =
@@ -55,8 +59,8 @@ const CORS = {
 };
 
 // ── Gemini call ───────────────────────────────────────────────────────────────
-async function callGemini(apiKey, systemPrompt, userMessage, maxTokens = 300, temperature = 0.7) {
-    const res = await fetch(`${GEMINI_URL}?key=${apiKey}`, {
+async function callGemini(apiKey, systemPrompt, userMessage, maxTokens = 300, temperature = 0.7, modelUrl = GEMINI_URL_FLASH) {
+    const res = await fetch(`${modelUrl}?key=${apiKey}`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -126,7 +130,7 @@ exports.handler = async (event) => {
     let report;
     try {
         if (isAnomaly) {
-            // ── Mode A: Forensic analysis of anomaly ──────────────────────────
+            // ── Mode A: Forensic analysis — full Flash model ──────────────────
             const userMessage =
                 `ANOMALY REPORT\n` +
                 `DATE:      ${date}\n` +
@@ -134,19 +138,28 @@ exports.handler = async (event) => {
                 `PEAK:      ${Number(peakMrh).toFixed(2)} µRh/h\n` +
                 `\nInitiate forensic analysis.`;
 
-            report = await callGemini(apiKey, FORENSIC_PROMPT, userMessage, 350, 0.65);
+            report = await callGemini(apiKey, FORENSIC_PROMPT, userMessage, 350, 0.65, GEMINI_URL_FLASH);
         } else {
-            // ── Mode B: Sarcastic all-clear one-liner ─────────────────────────
+            // ── Mode B: Sarcastic one-liner — Flash-Lite (higher free quota) ──
             const userMessage =
                 `STATUS REPORT\n` +
                 `DATE:    ${date}\n` +
                 `READING: ${Number(peakMrh).toFixed(2)} µRh/h (NORMAL — within baseline)\n` +
                 `\nProvide your assessment.`;
 
-            report = await callGemini(apiKey, SARCASTIC_PROMPT, userMessage, 80, 0.95);
+            report = await callGemini(apiKey, SARCASTIC_PROMPT, userMessage, 80, 0.95, GEMINI_URL_LITE);
         }
     } catch (err) {
         console.error('Gemini call failed:', err.message);
+
+        // Friendly quota-exceeded message instead of raw JSON dump
+        if (err.message.includes('429') || err.message.includes('RESOURCE_EXHAUSTED')) {
+            return {
+                statusCode: 429,
+                headers: CORS,
+                body: JSON.stringify({ error: 'QUOTA_EXCEEDED' }),
+            };
+        }
         return { statusCode: 502, headers: CORS, body: JSON.stringify({ error: `AI error: ${err.message}` }) };
     }
 

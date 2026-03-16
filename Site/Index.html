@@ -208,8 +208,8 @@
 // CONFIG — replace with your actual Supabase project values
 // Get these from: Supabase Dashboard → Project Settings → API
 // =============================================================================
-const SUPABASE_URL      = 'YOUR_SUPABASE_URL';       // e.g. https://xxxx.supabase.co
-const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';  // starts with "eyJ..."
+const SUPABASE_URL      = 'https://wbawevtbjfgsapbhxfea.supabase.co';       // e.g. https://xxxx.supabase.co
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndiYXdldnRiamZnc2FwYmh4ZmVhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM2NzE2MDEsImV4cCI6MjA4OTI0NzYwMX0.PsOkvsq3TvJrfnO-lBfLbXvHhdAFBWBBP47G3-P0J3M';  // starts with "eyJ..."
 const AI_ENDPOINT       = '/.netlify/functions/investigate';
 // =============================================================================
 
@@ -583,8 +583,32 @@ function typeText(element, text, speed = 16) {
 }
 
 // ── Call the AI Netlify function ──────────────────────────────────────────────
+// ── AI response cache (localStorage) ─────────────────────────────────────────
+const AI_CACHE_PREFIX = 'radwatch_ai_';
+function aiCacheKey(dateStr, isAnomaly) {
+    return `${AI_CACHE_PREFIX}${dateStr}_${isAnomaly ? 'forensic' : 'normal'}`;
+}
+function aiCacheGet(dateStr, isAnomaly) {
+    try { return localStorage.getItem(aiCacheKey(dateStr, isAnomaly)) || null; }
+    catch { return null; }
+}
+function aiCacheSet(dateStr, isAnomaly, report) {
+    try { localStorage.setItem(aiCacheKey(dateStr, isAnomaly), report); }
+    catch { /* storage full — not critical */ }
+}
+
 async function callAI({ dateStr, peakMrh, isAnomaly }) {
     setAIState('loading');
+
+    // ── Serve from cache if available ─────────────────────────────────────────
+    const cached = aiCacheGet(dateStr, isAnomaly);
+    if (cached) {
+        setAIState('typing');
+        await typeText(document.getElementById('ai-body'), cached);
+        setAIState('done');
+        document.getElementById('ai-retry').classList.add('hidden');
+        return;
+    }
 
     try {
         const res = await fetch(AI_ENDPOINT, {
@@ -593,12 +617,22 @@ async function callAI({ dateStr, peakMrh, isAnomaly }) {
             body:    JSON.stringify({ date: dateStr, peakMrh, isAnomaly }),
         });
 
-        if (!res.ok) {
-            const errData = await res.json().catch(() => ({ error: res.statusText }));
-            throw new Error(errData.error || `HTTP ${res.status}`);
+        const resData = await res.json().catch(() => ({}));
+
+        // ── Friendly quota error ───────────────────────────────────────────────
+        if (res.status === 429 || resData.error === 'QUOTA_EXCEEDED') {
+            const msg = "I'M SORRY, DAVE. I'M AFRAID I CAN'T DO THAT.\n// DAILY ANALYSIS QUOTA REACHED. TRY AGAIN TOMORROW.";
+            setAIState('typing');
+            await typeText(document.getElementById('ai-body'), msg);
+            setAIState('done');
+            document.getElementById('ai-retry').classList.add('hidden');
+            return;
         }
 
-        const { report } = await res.json();
+        if (!res.ok) throw new Error(resData.error || `HTTP ${res.status}`);
+
+        const { report } = resData;
+        aiCacheSet(dateStr, isAnomaly, report);   // cache for future clicks
         setAIState('typing');
         await typeText(document.getElementById('ai-body'), report);
         setAIState('done');
