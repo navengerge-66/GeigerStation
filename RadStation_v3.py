@@ -1,5 +1,5 @@
 """
-RadStation_v3.py
+RadStation_v3.1.py
 Fixes applied vs v2.0.7/v2.0.1:
   1. [CRITICAL] SerialReader: full reconnection logic — recovers from Bluetooth
                 drops without restarting the script
@@ -20,12 +20,18 @@ Fixes applied vs v2.0.7/v2.0.1:
   9. [LOW]      Telegram token read from TELEGRAM_TOKEN env var; falls back to
                 inline value for backward compatibility
  10. [LOW]      Standard logging module replaces silent failures everywhere
+ 11. [HIGH]     Differentiated link-loss detection: PORT_FAILURE (physical/OS
+                level) vs DATA_FAILURE (port open, bytes arriving, checksums
+                failing). watchdog() sends distinct Telegram alerts for each.
+                /health command now shows link state, bad-packet streak, and
+                separate "last raw bytes" vs "last valid packet" timestamps.
 """
 
 import os
 import time
 import csv
 import logging
+from enum import Enum
 import serial
 import schedule
 import pandas as pd
@@ -39,6 +45,19 @@ from scipy import signal
 from threading import Thread, Lock
 from queue import Queue, Empty, Full
 import requests
+
+# ── Link state machine ────────────────────────────────────────────────────────
+class LinkState(Enum):
+    INITIALIZING = "Initializing"  # script just started, no data seen yet
+    HEALTHY      = "Healthy"       # valid packets arriving and passing checksum
+    PORT_FAILURE = "Port Failure"  # OS-level: device gone, permission denied,
+                                   #           Bluetooth carrier lost
+    DATA_FAILURE = "Data Failure"  # port open and bytes arriving, but every
+                                   # packet fails checksum / has no delimiter
+
+# How many consecutive bad packets must arrive before DATA_FAILURE is declared.
+# At ~4 packets/s this equals ~4 seconds of sustained corruption before alert.
+BAD_STREAK_THRESHOLD = 15
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -74,7 +93,7 @@ last_received_time   = 0.0
 last_loop_heartbeat  = time.time()
 last_reader_heartbeat = time.time()
 
-connection_error_sent   = False
+last_alerted_link_state = None   # tracks what we last told Telegram about
 first_data_received     = False
 system_is_in_high_state = False
 consistent_alert_sent   = False
@@ -92,7 +111,15 @@ class SerialReader:
         self.port   = port
         self.rate   = rate
         self.buffer = Queue(maxsize=5000)
-        self.ser    = self._try_open()
+
+        # ── Diagnostic state (written by reader thread, read by watchdog) ────
+        # CPython's GIL makes single-attribute assignments atomic for the
+        # primitive types used here, so no extra Lock is needed.
+        self.link_state    = LinkState.INITIALIZING
+        self.bad_streak    = 0      # consecutive packets that failed validation
+        self.last_raw_time = 0.0    # last time ANY bytes arrived on the port
+
+        self.ser = self._try_open()
         Thread(target=self.reader_routine, daemon=True).start()
 
     def _try_open(self):
@@ -110,13 +137,25 @@ class SerialReader:
         except (ValueError, TypeError):
             return False
 
+    def _mark_bad_packet(self):
+        """Called whenever bytes arrive but the packet fails validation."""
+        self.bad_streak += 1
+        if self.bad_streak >= BAD_STREAK_THRESHOLD:
+            if self.link_state != LinkState.DATA_FAILURE:
+                log.warning(
+                    f"DATA_FAILURE declared after {self.bad_streak} "
+                    f"consecutive bad packets."
+                )
+            self.link_state = LinkState.DATA_FAILURE
+
     def reader_routine(self):
         global last_reader_heartbeat
         while True:
             last_reader_heartbeat = time.time()
 
-            # ── Reconnection logic ────────────────────────────────────────────
+            # ── Reconnection / PORT_FAILURE path ─────────────────────────────
             if self.ser is None or not self.ser.is_open:
+                self.link_state = LinkState.PORT_FAILURE
                 log.warning("Serial not open — attempting reconnect in 5 s…")
                 time.sleep(5)
                 if self.ser is not None:
@@ -125,22 +164,46 @@ class SerialReader:
                     except Exception:
                         pass
                 self.ser = self._try_open()
-                continue  # re-evaluate at the top of the loop
+                if self.ser is not None:
+                    # Port just re-opened; bad_streak cleared, but we leave
+                    # link_state as PORT_FAILURE until a valid packet confirms
+                    # the data layer is also healthy.
+                    self.bad_streak = 0
+                continue
 
             # ── Normal read path ──────────────────────────────────────────────
             try:
                 if self.ser.in_waiting > 0:
                     raw = self.ser.readline()
+                    if raw:
+                        self.last_raw_time = time.time()
+
                     line = raw.decode('utf-8', errors='ignore').strip()
+
                     if '*' in line:
                         parts = line.split('*')
                         if len(parts) == 2 and self.verify_checksum(parts[0], parts[1]):
+                            # ── Valid packet ──────────────────────────────────
+                            self.bad_streak = 0
+                            self.link_state = LinkState.HEALTHY
                             try:
                                 self.buffer.put_nowait(parts[0].strip())
                             except Full:
                                 log.warning("Serial read buffer full — packet dropped.")
+                        else:
+                            # Bytes arrived, delimiter present, but checksum wrong
+                            # or split produced ≠ 2 parts → protocol failure
+                            self._mark_bad_packet()
+                            log.debug(f"Checksum/format failure: {line!r}")
+                    elif line:
+                        # Bytes arrived but no '*' delimiter at all → garbage frame
+                        self._mark_bad_packet()
+                        log.debug(f"No delimiter in line: {line!r}")
+
             except serial.SerialException as e:
-                log.error(f"Serial read error: {e}")
+                # OS-level failure: device unplugged, Bluetooth carrier lost, etc.
+                log.error(f"Serial PORT error (physical loss): {e}")
+                self.link_state = LinkState.PORT_FAILURE
                 try:
                     self.ser.close()
                 except Exception:
@@ -298,13 +361,32 @@ class TeleMessenger:
                         ).start()
 
                     elif cmd == "/health":
-                        uptime = round((time.time() - start_time) / 3600, 1)
-                        stream = 'Active' if time.time() - last_received_time < 10 else 'SILENT'
-                        self.send(
-                            f"🩺 *System Health*\n"
-                            f"• Uptime: `{uptime}h`\n"
-                            f"• Stream: `{stream}`"
-                        )
+                        now_h  = time.time()
+                        uptime = round((now_h - start_time) / 3600, 1)
+                        state  = reader.link_state
+                        since_valid = int(now_h - last_received_time) if last_received_time else -1
+                        since_raw   = int(now_h - reader.last_raw_time) if reader.last_raw_time else -1
+
+                        state_emoji = {
+                            LinkState.HEALTHY:      "🟢",
+                            LinkState.INITIALIZING: "🔵",
+                            LinkState.DATA_FAILURE: "🟡",
+                            LinkState.PORT_FAILURE: "🔴",
+                        }.get(state, "⚪")
+
+                        lines = [
+                            f"🩺 *System Health*",
+                            f"• Uptime: `{uptime}h`",
+                            f"• Link: {state_emoji} `{state.value}`",
+                        ]
+                        if since_valid >= 0:
+                            lines.append(f"• Last valid packet: `{since_valid}s` ago")
+                        if reader.last_raw_time and since_raw != since_valid:
+                            lines.append(f"• Last raw bytes: `{since_raw}s` ago")
+                        if state == LinkState.DATA_FAILURE:
+                            lines.append(f"• Bad packet streak: `{reader.bad_streak}`")
+
+                        self.send("\n".join(lines))
 
                     elif cmd == "/reboot":
                         self.send("🔄 *Manual Reboot Initiated…*")
@@ -509,18 +591,86 @@ def minute_processing():
 
 
 def watchdog():
-    """Alert if no data received from the Geiger tube for > 80 s."""
-    global connection_error_sent
-    now = time.time()
-    if now - last_received_time > 80 and first_data_received:
-        if not connection_error_sent:
-            messenger.send_async("🚨 *GEIGER LOST!*")
-            connection_error_sent = True
-            log.warning("Geiger link lost.")
-    elif connection_error_sent and now - last_received_time < 80:
-        messenger.send_async("✅ *GEIGER RESTORED!*")
-        connection_error_sent = False
-        log.info("Geiger link restored.")
+    """
+    Differentiated link-loss alert.
+
+    Distinguishes between two failure modes so the operator knows
+    whether to inspect the physical connection or the data protocol:
+
+    PORT_FAILURE  — SerialException / device gone / Bluetooth carrier lost.
+                    The OS cannot communicate with the port at all.
+
+    DATA_FAILURE  — Port is open and bytes are arriving, but every packet
+                    fails checksum or has no '*' delimiter.  Typical causes:
+                    baud-rate mismatch after Arduino reset, RF interference,
+                    HC-06 pairing to the wrong device, or firmware bug.
+    """
+    global last_alerted_link_state
+    if not first_data_received:
+        return
+
+    now      = time.time()
+    silence  = now - last_received_time   # seconds since last VALID packet
+    state    = reader.link_state
+
+    # ── Active fault ──────────────────────────────────────────────────────────
+    if silence > 80:
+        if state == LinkState.PORT_FAILURE:
+            if last_alerted_link_state != LinkState.PORT_FAILURE:
+                messenger.send_async(
+                    "🔌 *PORT FAILURE*\n"
+                    "Physical connection lost — serial device gone or Bluetooth "
+                    "carrier dropped.\n"
+                    f"No valid data for `{int(silence)}s`."
+                )
+                last_alerted_link_state = LinkState.PORT_FAILURE
+                log.warning("Watchdog: PORT_FAILURE declared.")
+
+        elif state == LinkState.DATA_FAILURE:
+            if last_alerted_link_state != LinkState.DATA_FAILURE:
+                messenger.send_async(
+                    "⚠️ *DATA CORRUPTION*\n"
+                    "Serial port is open and bytes are arriving, but every "
+                    "packet fails checksum validation.\n"
+                    f"Bad packet streak: `{reader.bad_streak}`\n"
+                    f"Last raw bytes: `{int(now - reader.last_raw_time)}s` ago\n"
+                    f"No valid data for `{int(silence)}s`.\n"
+                    "_Possible causes: baud rate mismatch, RF interference, "
+                    "wrong BT pairing, Arduino mid-reset._"
+                )
+                last_alerted_link_state = LinkState.DATA_FAILURE
+                log.warning(
+                    f"Watchdog: DATA_FAILURE declared. "
+                    f"Bad streak={reader.bad_streak}, "
+                    f"last_raw={int(now - reader.last_raw_time)}s ago."
+                )
+
+        else:
+            # Port looks healthy but valid data stopped — state hasn't
+            # degraded yet (e.g. Arduino froze mid-transmission).
+            if last_alerted_link_state not in (
+                LinkState.PORT_FAILURE, LinkState.DATA_FAILURE
+            ):
+                messenger.send_async(
+                    f"🚨 *GEIGER SILENT!*\n"
+                    f"No valid data for `{int(silence)}s` — link state "
+                    f"still reports `{state.value}`. Possible Arduino hang."
+                )
+                last_alerted_link_state = LinkState.DATA_FAILURE
+                log.warning("Watchdog: data stream silent despite healthy port state.")
+
+    # ── Recovery ──────────────────────────────────────────────────────────────
+    elif last_alerted_link_state in (
+        LinkState.PORT_FAILURE, LinkState.DATA_FAILURE
+    ):
+        prev = last_alerted_link_state.value
+        messenger.send_async(
+            f"✅ *GEIGER RESTORED!*\n"
+            f"Valid data is flowing again.\n"
+            f"Previous fault: `{prev}`"
+        )
+        last_alerted_link_state = LinkState.HEALTHY
+        log.info(f"Watchdog: link restored after {prev}.")
 
 
 def do_report(mode: str):
