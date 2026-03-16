@@ -49,7 +49,11 @@
 
         /* Calendar cells */
         .day-empty  { background: #0a0f0a; border: 1px solid #0d1f0d; opacity: 0.4; }
-        .day-normal { background: #0c2b0c; border: 1px solid #1a4d1a; color: #2a7a2a; }
+        .day-normal {
+            background: #0c2b0c; border: 1px solid #1a4d1a; color: #2a7a2a;
+            cursor: pointer; transition: transform .15s, background .15s;
+        }
+        .day-normal:hover { transform: scale(1.08); background: #0f3d0f; }
         .day-anomaly {
             background: var(--amber-bg);
             border: 1.5px solid var(--amber-bd);
@@ -127,14 +131,20 @@
         </div>
     </section>
 
-    <!-- 30-day calendar -->
+    <!-- Navigable calendar -->
     <section class="card p-6 rounded-lg md:col-span-3">
-        <div class="flex justify-between items-center mb-5">
-            <h2 class="neon text-[10px] tracking-widest opacity-70">GEIGER_EVENT_LOG — 30_DAY</h2>
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="neon text-[10px] tracking-widest opacity-70">GEIGER_EVENT_LOG</h2>
             <span class="text-[9px] opacity-40 neon">
                 <span class="inline-block w-2 h-2 bg-green-900 border border-green-700 rounded-sm mr-1"></span>NORMAL &nbsp;
                 <span class="inline-block w-2 h-2 bg-amber-900/30 border border-amber-500 rounded-sm mr-1"></span>ANOMALY
             </span>
+        </div>
+        <!-- Month navigation -->
+        <div class="flex items-center justify-center gap-4 mb-4">
+            <button onclick="prevMonth()" class="neon text-[11px] border border-green-900 px-3 py-1 rounded hover:bg-green-900/30 transition-colors tracking-widest">◀ PREV</button>
+            <span id="cal-month-label" class="neon text-[11px] tracking-widest font-bold w-36 text-center"></span>
+            <button onclick="nextMonth()" id="cal-next-btn" class="neon text-[11px] border border-green-900 px-3 py-1 rounded hover:bg-green-900/30 transition-colors tracking-widest">NEXT ▶</button>
         </div>
         <!-- Day-of-week header -->
         <div class="grid grid-cols-7 gap-1.5 md:gap-3 max-w-2xl mx-auto mb-1.5 text-[8px] opacity-30 text-center">
@@ -166,7 +176,7 @@
         <div class="card p-5 rounded-lg flex flex-col">
             <div class="flex items-center gap-2 mb-4 pb-2 border-b border-amber-900/50">
                 <span id="ai-dot" class="status-dot dot-amber"></span>
-                <h3 class="amber text-[10px] font-bold tracking-widest">AI_INVESTIGATOR_REPORT</h3>
+                <h3 id="ai-panel-title" class="amber text-[10px] font-bold tracking-widest">AI_INVESTIGATOR_REPORT</h3>
             </div>
 
             <div id="ai-loader" class="hidden flex-1 flex items-center justify-center">
@@ -223,6 +233,12 @@ let dailyChart  = null;
 let selectedDay = null;
 let lastAnomalyPayload = null;
 let pollTimer   = 60;
+let lastLiveTimestamp  = null;   // set by fetchLive() from the most recent geiger_logs row
+
+// Calendar navigation: year + month currently in view (0-based month)
+const _calNow = new Date();
+let calYear  = _calNow.getFullYear();
+let calMonth = _calNow.getMonth();
 
 // ── Hourly trend chart (initialised once, data updated each poll) ─────────────
 function initHourlyChart() {
@@ -252,7 +268,19 @@ function initHourlyChart() {
             }},
             scales: {
                 y: { grid: { color: C_BORDER }, ticks: { color: C_GREEN } },
-                x: { display: false },
+                x: {
+                    display: true,
+                    grid:  { color: 'rgba(26,77,26,0.5)', drawTicks: true },
+                    ticks: {
+                        color: C_GREEN, maxRotation: 0, autoSkip: false,
+                        callback: function(val, idx) {
+                            const label = this.getLabelForValue(val);
+                            if (!label) return '';
+                            const mm = parseInt(label.split(':')[1], 10);
+                            return mm % 10 === 0 ? label : '';
+                        },
+                    },
+                },
             },
         },
     });
@@ -288,6 +316,7 @@ async function fetchLive() {
         else                 badge.classList.add('hidden');
 
         const ts = new Date(data.created_at);
+        lastLiveTimestamp = ts;
         document.getElementById('last-update').textContent =
             ts.toLocaleTimeString('en-GB', { hour12: false });
 
@@ -332,119 +361,129 @@ async function fetchTrend() {
     }
 }
 
-// ── Build 30-day calendar from daily_summary view ────────────────────────────
+// ── Calendar navigation ───────────────────────────────────────────────────────
+function prevMonth() {
+    calMonth--; if (calMonth < 0) { calMonth = 11; calYear--; }
+    buildCalendar();
+}
+function nextMonth() {
+    calMonth++; if (calMonth > 11) { calMonth = 0; calYear++; }
+    buildCalendar();
+}
+
+// ── Build full-month navigable calendar ───────────────────────────────────────
 async function buildCalendar() {
-    const grid = document.getElementById('calendar-grid');
-    grid.innerHTML = '';
+    const grid       = document.getElementById('calendar-grid');
+    const monthLabel = document.getElementById('cal-month-label');
+    const nextBtn    = document.getElementById('cal-next-btn');
+    grid.innerHTML   = '';
 
-    // Date range: today back 29 days (30 total)
-    const today   = new Date();
-    today.setHours(0, 0, 0, 0);
-    const start30 = new Date(today);
-    start30.setDate(today.getDate() - 29);
+    const MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+    monthLabel.textContent = `${MONTHS[calMonth]} ${calYear}`;
 
-    // Fetch daily summaries
+    // Disable NEXT when on current or future month
+    const now = new Date();
+    const isCurrent = calYear === now.getFullYear() && calMonth >= now.getMonth();
+    nextBtn.disabled      = isCurrent;
+    nextBtn.style.opacity = isCurrent ? '0.3' : '1';
+
+    const firstDay   = new Date(calYear, calMonth, 1);
+    const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate();
+    const rangeStart = `${calYear}-${String(calMonth+1).padStart(2,'0')}-01`;
+    const rangeEnd   = `${calYear}-${String(calMonth+1).padStart(2,'0')}-${String(daysInMonth).padStart(2,'0')}`;
+
     let summaryMap = {};
     try {
         const { data, error } = await db
             .from('daily_summary')
-            .select('day, avg_mrh, peak_mrh, has_anomaly, reading_count')
-            .gte('day', start30.toISOString().split('T')[0])
+            .select('day, avg_mrh, peak_mrh, min_mrh, has_anomaly, reading_count')
+            .gte('day', rangeStart).lte('day', rangeEnd)
             .order('day', { ascending: true });
-
         if (error) throw error;
         summaryMap = Object.fromEntries(data.map(r => [r.day, r]));
-    } catch (e) {
-        console.warn('buildCalendar error:', e.message);
-    }
+    } catch (e) { console.warn('buildCalendar error:', e.message); }
 
-    // Padding so the first cell aligns to the correct weekday (Mon=0)
-    const firstDow = (start30.getDay() + 6) % 7; // convert Sun=0 to Mon=0
+    // Padding to align first cell to Monday
+    const firstDow = (firstDay.getDay() + 6) % 7;
     for (let p = 0; p < firstDow; p++) {
         const pad = document.createElement('div');
         pad.className = 'day-empty aspect-square rounded';
         grid.appendChild(pad);
     }
 
-    for (let i = 0; i < 30; i++) {
-        const d    = new Date(start30);
-        d.setDate(start30.getDate() + i);
-        const key  = d.toISOString().split('T')[0];  // YYYY-MM-DD
-        const row  = summaryMap[key];
-        const dd   = String(d.getDate()).padStart(2, '0');
+    const todayKey = now.toISOString().split('T')[0];
+    for (let d = 1; d <= daysInMonth; d++) {
+        const date   = new Date(calYear, calMonth, d);
+        const key    = `${calYear}-${String(calMonth+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+        const row    = summaryMap[key];
+        const future = date > now;
 
         const cell = document.createElement('div');
         cell.className = 'aspect-square rounded flex items-center justify-center text-[11px] font-bold select-none';
         cell.dataset.date = key;
-        cell.textContent  = dd;
+        cell.textContent  = String(d).padStart(2, '0');
+        if (key === todayKey) cell.style.outline = '1px solid #33ff3366';
 
-        if (!row) {
+        if (future || !row) {
             cell.classList.add('day-empty');
         } else if (row.has_anomaly) {
             cell.classList.add('day-anomaly');
-            cell.title = `Peak: ${row.peak_mrh} µRh/h`;
-            cell.addEventListener('click', () => openAnomalyPanel(key, row));
+            cell.title = `Peak: ${row.peak_mrh} µRh/h | Avg: ${row.avg_mrh} µRh/h`;
+            cell.addEventListener('click', () => openDayPanel(key, row, true));
         } else {
             cell.classList.add('day-normal');
+            cell.title = `Avg: ${row.avg_mrh} µRh/h | Readings: ${row.reading_count}`;
+            cell.addEventListener('click', () => openDayPanel(key, row, false));
         }
-
         grid.appendChild(cell);
     }
 }
 
-// ── Open the anomaly investigation panel for a specific day ──────────────────
-async function openAnomalyPanel(dateStr, summary) {
-    // Highlight selected cell
+// ── Open day investigation panel (green or orange) ───────────────────────────
+async function openDayPanel(dateStr, summary, isAnomaly) {
     document.querySelectorAll('.day-selected').forEach(el => el.classList.remove('day-selected'));
     const cell = document.querySelector(`[data-date="${dateStr}"]`);
     if (cell) cell.classList.add('day-selected');
 
     selectedDay = dateStr;
-
-    // Show panel and scroll to it
     const panel = document.getElementById('anomaly-panel');
     panel.classList.remove('hidden');
     panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
-    // Update metadata bar
+    const title = document.getElementById('ai-panel-title');
+    if (title) {
+        title.textContent = isAnomaly ? 'AI_FORENSICS_REPORT' : 'AI_STATUS_REPORT';
+        title.style.color = isAnomaly ? 'var(--amber)' : 'var(--fg)';
+    }
+
     document.getElementById('ev-date').textContent  = dateStr;
     document.getElementById('ev-peak').textContent  = Number(summary.peak_mrh).toFixed(2);
     document.getElementById('ev-avg').textContent   = Number(summary.avg_mrh).toFixed(2);
     document.getElementById('ev-count').textContent = summary.reading_count;
 
-    // Reset AI panel
     setAIState('waiting');
     document.getElementById('ai-retry').classList.add('hidden');
 
-    // Fetch all readings for that day and build the hourly profile
     try {
-        const startISO = `${dateStr}T00:00:00+04:00`;  // Tbilisi UTC+4
-        const endISO   = `${dateStr}T23:59:59+04:00`;
+        const dayStart = new Date(`${dateStr}T00:00:00+04:00`);
+        const dayEnd   = new Date(`${dateStr}T23:59:59+04:00`);
 
         const { data, error } = await db
             .from('geiger_logs')
             .select('created_at, mrh_value, is_anomaly')
-            .gte('created_at', startISO)
-            .lte('created_at', endISO)
+            .gte('created_at', dayStart.toISOString())
+            .lte('created_at', dayEnd.toISOString())
             .order('created_at', { ascending: true });
 
         if (error) throw error;
-
         renderDailyChart(data, dateStr);
 
-        // Build hourly profile for AI context
-        const hourlyProfile = buildHourlyProfile(data);
-        const peakMrh       = summary.peak_mrh;
-        const avgMrh        = summary.avg_mrh;
-
-        lastAnomalyPayload = { dateStr, peakMrh, avgMrh, hourlyProfile, readingCount: data.length };
-
-        // Trigger AI analysis
+        lastAnomalyPayload = { dateStr, peakMrh: summary.peak_mrh, isAnomaly };
         setAIState('loading');
         await callAI(lastAnomalyPayload);
 
     } catch (e) {
-        console.error('openAnomalyPanel error:', e);
+        console.error('openDayPanel error:', e);
         setAIState('error', e.message);
         document.getElementById('ai-retry').classList.remove('hidden');
     }
@@ -544,14 +583,14 @@ function typeText(element, text, speed = 16) {
 }
 
 // ── Call the AI Netlify function ──────────────────────────────────────────────
-async function callAI({ dateStr, peakMrh }) {
+async function callAI({ dateStr, peakMrh, isAnomaly }) {
     setAIState('loading');
 
     try {
         const res = await fetch(AI_ENDPOINT, {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({ date: dateStr, peakMrh }),
+            body:    JSON.stringify({ date: dateStr, peakMrh, isAnomaly }),
         });
 
         if (!res.ok) {
@@ -606,25 +645,58 @@ function setAIState(state, text = '') {
         // waiting / idle
         dot.classList.remove('blink');
         dot.style.background = '';
-        body.innerHTML = 'Awaiting data selection.<br>Click an <span style="color:var(--amber)">orange</span> event node to begin investigation.';
+        body.innerHTML = 'Awaiting data selection.<br>Click a <span style="color:#33ff33">green</span> day for an all-clear report or an <span style="color:var(--amber)">orange</span> day for forensic analysis.';
     }
 }
 
 // ── Uplink status indicator ───────────────────────────────────────────────────
-function setUplink(ok) {
+function setUplinkState(state, customLabel = '') {
     const dot   = document.getElementById('uplink-dot');
     const label = document.getElementById('uplink-label');
-    const state = document.getElementById('hdr-state');
-
-    if (ok) {
-        dot.className   = 'status-dot dot-green mr-1.5';
+    const hdr   = document.getElementById('hdr-state');
+    if (state === 'stable') {
+        dot.className     = 'status-dot dot-green mr-1.5';
         label.textContent = 'UPLINK_STABLE';
-        state.textContent = 'ACTIVE_MONITORING';
+        label.style.color = '';
+        hdr.textContent   = 'ACTIVE_MONITORING';
+    } else if (state === 'lost') {
+        dot.className     = 'status-dot dot-amber mr-1.5 blink';
+        label.textContent = customLabel || 'LINK_LOST';
+        label.style.color = 'var(--amber)';
+        hdr.textContent   = 'PI_UNREACHABLE';
     } else {
-        dot.className   = 'status-dot dot-red mr-1.5 blink';
+        dot.className     = 'status-dot dot-red mr-1.5 blink';
         label.textContent = 'UPLINK_ERROR';
-        state.textContent = 'CONNECTION_FAULT';
+        label.style.color = 'var(--red)';
+        hdr.textContent   = 'CONNECTION_FAULT';
     }
+}
+function setUplink(ok) { setUplinkState(ok ? 'stable' : 'error'); }
+
+// ── Fetch Pi heartbeat from system_status ─────────────────────────────────────
+async function fetchHeartbeat() {
+    try {
+        // Primary: if geiger_logs has a row <10 min old, Pi is clearly alive
+        if (lastLiveTimestamp && (Date.now() - lastLiveTimestamp.getTime()) < 10 * 60_000) {
+            setUplinkState('stable');
+            return;
+        }
+        // Secondary: system_status ping (requires Pi code ≥ this version)
+        const { data, error } = await db
+            .from('system_status')
+            .select('last_seen, queue_depth')
+            .eq('station_id', 'tbilisi-01')
+            .maybeSingle();
+        if (error) throw error;
+        if (!data) return;
+        const ageMs = Date.now() - new Date(data.last_seen).getTime();
+        document.getElementById('queue-depth').textContent = data.queue_depth ?? 0;
+        if (ageMs > 10 * 60_000) {
+            setUplinkState('lost', `LINK_LOST (${Math.floor(ageMs/60_000)}m AGO)`);
+        } else {
+            setUplinkState('stable');
+        }
+    } catch (e) { console.warn('fetchHeartbeat error:', e.message); }
 }
 
 // ── Poll countdown timer ──────────────────────────────────────────────────────
@@ -640,18 +712,14 @@ function startCountdown() {
 // ── Full data refresh ─────────────────────────────────────────────────────────
 async function refresh() {
     startCountdown();
-    await Promise.all([fetchLive(), fetchTrend()]);
+    await Promise.all([fetchLive(), fetchTrend(), fetchHeartbeat()]);
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
     initHourlyChart();
     await Promise.all([refresh(), buildCalendar()]);
-
-    // Rebuild calendar once per hour to pick up new anomaly days
     setInterval(buildCalendar, 3_600_000);
-
-    // Live + trend every 60 s
     setInterval(refresh, 60_000);
 }
 
