@@ -18,7 +18,7 @@ Type=simple
 User=navenger
 WorkingDirectory=/home/navenger/radstat
 
-ExecStart=/usr/bin/python3 -u /home/navenger/radstat/RadStation_v3.py
+ExecStart=/home/navenger/radstat/venv/bin/python3 -u /home/navenger/radstat/RadStation_v3.py
 
 # Restart unconditionally — covers crashes, OOM kills, and unhandled exceptions.
 # The updater's health check relies on this: if the new code crashes on start,

@@ -18,8 +18,9 @@ Type=oneshot
 # Run as the same user who owns the repo clone
 User=navenger
 
-# PATH must include git and python3
-Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# PATH includes the venv so the updater's syntax check uses the same
+# interpreter and installed packages as the running service
+Environment="PATH=/home/navenger/radstat/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Pass the Telegram credentials so the updater can send notifications.
 # These should match the values set in radstation.service.

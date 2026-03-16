@@ -23,6 +23,7 @@ set -uo pipefail
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 REPO_DIR="/home/navenger/radstat"
+VENV_PYTHON="${REPO_DIR}/venv/bin/python3"
 SCRIPT_NAME="RadStation_v3.py"
 SERVICE="radstation"
 BRANCH="main"
@@ -119,7 +120,7 @@ log "info" "git pull complete → ${REMOTE:0:7}"
 # ── Step 4: Syntax validation ─────────────────────────────────────────────────
 # Run BEFORE restarting the service. A syntax error is caught here and the
 # service is never interrupted — the Pi keeps running the previous version.
-if ! python3 -m py_compile "${SCRIPT_NAME}" 2>&1; then
+if ! "${VENV_PYTHON}" -m py_compile "${SCRIPT_NAME}" 2>&1; then
     log "err" "Syntax check FAILED on ${REMOTE:0:7}. Reverting without restart."
     cp "${SCRIPT_NAME}.backup" "${SCRIPT_NAME}"
     git reset --hard "$LOCAL" --quiet

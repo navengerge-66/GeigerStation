@@ -6,9 +6,9 @@
 #   sudo bash install.sh
 #
 # What this does:
-#   1. Installs system dependencies (git, python3-pip, curl)
-#   2. Installs Python package dependencies
-#   3. Clones (or updates) the GitHub repo to INSTALL_DIR
+#   1. Installs system dependencies (git, python3-venv, curl)
+#   2. Clones (or updates) the GitHub repo to INSTALL_DIR
+#   3. Creates a Python venv at INSTALL_DIR/venv and installs packages into it
 #   4. Installs the updater script to /usr/local/bin
 #   5. Installs and enables systemd units for both the service and the timer
 #   6. Prompts for Telegram credentials and writes them into the unit files
@@ -38,16 +38,11 @@ step() { printf "\n${YELLOW}▶ %s${NC}\n" "$*"; }
 # ── Step 1: System packages ───────────────────────────────────────────────────
 step "Installing system packages"
 apt-get update --allow-releaseinfo-change -qq
-apt-get install -y --no-install-recommends git python3-pip python3-venv curl
+# python3-venv is required to create the isolated environment (PEP 668 safe)
+apt-get install -y --no-install-recommends git python3-venv curl
 ok "System packages ready."
 
-# ── Step 2: Python packages ───────────────────────────────────────────────────
-step "Installing Python packages"
-pip3 install --quiet --upgrade \
-    pyserial schedule pandas numpy matplotlib scipy requests
-ok "Python packages installed."
-
-# ── Step 3: Clone or update repo ──────────────────────────────────────────────
+# ── Step 2: Clone or update repo ──────────────────────────────────────────────
 step "Setting up repository at ${INSTALL_DIR}"
 if [[ -d "${INSTALL_DIR}/.git" ]]; then
     warn "Repo already exists — pulling latest."
@@ -60,7 +55,24 @@ fi
 sudo -u "$SERVICE_USER" mkdir -p "${INSTALL_DIR}/archive"
 ok "Repository ready."
 
-# ── Step 4: Telegram credentials ─────────────────────────────────────────────
+# ── Step 3: Python virtual environment + packages ────────────────────────────
+# Modern Raspberry Pi OS (Bookworm/Trixie) enforces PEP 668 which blocks
+# system-wide pip installs. We create an isolated venv instead.
+step "Creating Python virtual environment and installing packages"
+VENV_DIR="${INSTALL_DIR}/venv"
+if [[ ! -d "$VENV_DIR" ]]; then
+    sudo -u "$SERVICE_USER" python3 -m venv "$VENV_DIR"
+    ok "Virtual environment created at ${VENV_DIR}."
+else
+    warn "Virtual environment already exists — upgrading packages."
+fi
+
+sudo -u "$SERVICE_USER" "${VENV_DIR}/bin/pip" install --quiet --upgrade pip
+sudo -u "$SERVICE_USER" "${VENV_DIR}/bin/pip" install --quiet --upgrade \
+    pyserial schedule pandas numpy matplotlib scipy requests
+ok "Python packages installed into venv."
+
+# ── Step 4: Telegram credentials ──────────────────────────────────────────────
 step "Telegram credentials"
 read -r -p "  Enter your Telegram Bot Token (or press Enter to skip): " TG_TOKEN
 read -r -p "  Enter your Telegram Chat ID   (or press Enter to skip): " TG_CHAT
